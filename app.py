@@ -89,13 +89,21 @@ def load_fact():
     df = load_and_preprocess(p)
     if "hs4" in df.columns:
         df["hs4_desc"] = df["hs4"].map(HS4_DESC).fillna("HS"+df["hs4"].fillna("").astype(str))
-    # COUNTRY_NAMES takes priority for known codes; Comtrade name used for all others
+    # COUNTRY_NAMES first; text Comtrade names kept; numeric codes → "Other (code)"
     if "partner_iso3" in df.columns:
         mapped = df["partner_iso3"].astype(str).map(COUNTRY_NAMES)
         if "partner_name" not in df.columns:
-            df["partner_name"] = mapped.fillna("Country " + df["partner_iso3"].astype(str))
+            df["partner_name"] = mapped.fillna(
+                "Other (" + df["partner_iso3"].astype(str) + ")"
+            )
         else:
-            df["partner_name"] = mapped.fillna(df["partner_name"])
+            comtrade = df["partner_name"].astype(str).str.strip()
+            is_numeric = comtrade.str.match(r"^\d+$", na=False)
+            fallback = comtrade.where(
+                ~is_numeric,
+                "Other (" + df["partner_iso3"].astype(str) + ")",
+            )
+            df["partner_name"] = mapped.fillna(fallback)
     return df
 
 @st.cache_data(show_spinner="Loading sector summary…")
@@ -169,13 +177,23 @@ def top_products(df, flow, level, n=15):
     r["value_bn"]  = r["value_usd"]/1e9
     tot = df[df["flow"]==flow]["value_usd"].sum()
     r["share_pct"] = 100*r["value_usd"]/tot if tot>0 else 0
-    # Build display label
-    if level=="hs4" and "hs4_desc" in r.columns:
-        r["label"] = r["hs4"].astype(str)+" – "+r["hs4_desc"].astype(str)
-    elif "product_desc" in r.columns and r["product_desc"].fillna("").ne("").any():
-        r["label"] = r[level].astype(str)+" – "+r["product_desc"].astype(str).str[:50]
+    # Build display label — always "CODE — Description" or "HS CODE"
+    code_col = r[level].astype(str)
+    if level == "hs4":
+        desc = (r["hs4_desc"] if "hs4_desc" in r.columns
+                else code_col.map(HS4_DESC))
+        r["label"] = code_col + " — " + desc.fillna("HS " + code_col)
+    elif level == "hs6":
+        desc = code_col.map(hs6_desc) if hs6_desc else pd.Series("", index=r.index)
+        if "product_desc" in r.columns:
+            explicit = r["product_desc"].fillna("").astype(str).str.strip()
+            desc = explicit.where(explicit != "", desc)
+        r["label"] = code_col + " — " + desc.fillna("HS " + code_col)
     else:
-        r["label"] = r[level].astype(str)+" – "+r[level].map(HS4_DESC).fillna("").astype(str)
+        if "product_desc" in r.columns and r["product_desc"].fillna("").ne("").any():
+            r["label"] = code_col + " — " + r["product_desc"].fillna("HS " + code_col).astype(str)
+        else:
+            r["label"] = code_col
     return r.reset_index(drop=True)
 
 def china_dep(df):
@@ -295,19 +313,29 @@ def apply_filters(df):
 # PAGE A — GLOBAL OVERVIEW
 # ══════════════════════════════════════════════════════════════════
 if page=="🌐 Global Overview":
-    st.title("India Trade Intelligence Dashboard")
-    st.markdown(
-        "**HS85 Electronics & Electrical Equipment | UN Comtrade+ 2014–2024 | NCAER**"
-    )
-    st.markdown(
-        "Bilateral trade flows, China supply-chain exposure, export competitiveness (RCA), "
-        "and tariff structure (CBIC 2025-26) for India's electronics sector. "
-        "Select **Sector Deep Dive** in the sidebar to begin."
-    )
-    st.divider()
+    # ── Hero banner ──────────────────────────────────────────────────────────
+    st.markdown("""
+<div style="background:linear-gradient(135deg,#0F2347 0%,#1B4A8C 100%);
+            border-radius:12px;padding:36px 40px 32px;margin-bottom:8px">
+  <div style="color:#93C5FD;font-size:12px;letter-spacing:2.5px;
+              text-transform:uppercase;font-weight:600;margin-bottom:8px">
+    NCAER Research &nbsp;·&nbsp; Policy-Grade Analytics
+  </div>
+  <div style="color:#FFFFFF;font-size:34px;font-weight:800;line-height:1.2">
+    India Trade Intelligence
+  </div>
+  <div style="color:#93C5FD;font-size:17px;margin-top:6px;font-weight:500">
+    HS85 Electronics &amp; Electrical Equipment
+  </div>
+  <div style="color:#94A3B8;font-size:13px;margin-top:14px;line-height:1.7">
+    UN Comtrade+ Bulk API &nbsp;·&nbsp; 2014–2024 &nbsp;·&nbsp;
+    416,000 trade records &nbsp;·&nbsp; 200+ partner countries &nbsp;·&nbsp;
+    CBIC Tariff Schedule 2025-26
+  </div>
+</div>
+""", unsafe_allow_html=True)
 
     src = df_summary if not df_summary.empty else df_fact
-
     if src.empty:
         st.error("Trade data not found. Check that `data/processed/fact_trade_flows.parquet` exists.")
         st.stop()
@@ -317,45 +345,109 @@ if page=="🌐 Global Overview":
     deficit = total_m - total_x
     years   = sorted(src["year"].dropna().unique().tolist())
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("🟢 Total Exports", f"${total_x:,.0f}bn",
-              help="HS85 electronics goods India sold abroad, 2014–2024")
-    c2.metric("🔵 Total Imports", f"${total_m:,.0f}bn",
-              help="HS85 electronics goods India bought from abroad, 2014–2024")
-    c3.metric("⚖️ Trade Deficit", f"${deficit:,.0f}bn",
+    top_partner = "—"
+    if not df_fact.empty:
+        _tp = (df_fact[df_fact["flow"]=="M"]
+               .groupby("partner_name")["value_usd"].sum()
+               .sort_values(ascending=False))
+        if not _tp.empty:
+            top_partner = str(_tp.index[0])
+
+    # ── 4 KPI cards ──────────────────────────────────────────────────────────
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+    c1,c2,c3,c4 = st.columns(4)
+    c1.metric("🟢 Total Exports",       f"${total_x:,.0f}bn",
+              help="All HS85 electronics exports, cumulative 2014–2024")
+    c2.metric("🔵 Total Imports",       f"${total_m:,.0f}bn",
+              help="All HS85 electronics imports, cumulative 2014–2024")
+    c3.metric("⚖️ Trade Deficit",       f"${deficit:,.0f}bn",
               delta=f"India imports ${deficit:,.0f}bn more than it exports",
               delta_color="inverse")
-    c4.metric("📅 Years covered",
-              f"{min(years)}–{max(years)}" if years else "—",
-              delta=f"{len(years)} years of data")
+    c4.metric("🌏 Top Import Partner",  top_partner,
+              help="Highest cumulative HS85 import source, 2014–2024")
 
     st.divider()
 
-    bal = annual_balance(src)
-    fig = go.Figure()
-    fig.add_bar(x=bal["year"], y=bal["exports_bn"], name="Exports",
-                marker_color="#10B981", opacity=0.85)
-    fig.add_bar(x=bal["year"], y=bal["imports_bn"], name="Imports",
-                marker_color="#3B82F6", opacity=0.85)
-    fig.add_scatter(x=bal["year"], y=bal["balance_bn"], name="Balance",
-                    mode="lines+markers",
-                    line=dict(color="#DC2626", width=2.5),
-                    marker=dict(size=7, color="#DC2626"))
-    fig.add_hline(y=0, line_dash="dash", line_color="#9CA3AF", opacity=0.5)
-    fig.update_layout(barmode="group", height=370,
-                      yaxis_title="USD Billion",
-                      title="HS85 Electronics — India's Annual Trade Balance",
-                      legend=dict(orientation="h", y=1.1),
-                      hovermode="x unified", plot_bgcolor="white",
-                      paper_bgcolor="white")
-    st.plotly_chart(fig, use_container_width=True)
-    dl(bal, "Annual Balance", "annual_balance.csv")
+    # ── 2 charts side by side ────────────────────────────────────────────────
+    col_l, col_r = st.columns(2)
 
-    st.info(
-        "👉 Use **Sector Deep Dive** in the sidebar to analyse: "
-        "trade partners, products at HS4/HS6 level, China supply-chain risk, "
-        "export competitiveness (RCA), and tariff structure."
-    )
+    with col_l:
+        st.markdown("**Annual Trade Balance — HS85 Electronics**")
+        bal = annual_balance(src)
+        fig1 = go.Figure()
+        fig1.add_bar(x=bal["year"], y=bal["exports_bn"], name="Exports",
+                     marker_color="#10B981", opacity=0.85)
+        fig1.add_bar(x=bal["year"], y=bal["imports_bn"], name="Imports",
+                     marker_color="#3B82F6", opacity=0.85)
+        fig1.add_scatter(x=bal["year"], y=bal["balance_bn"], name="Balance",
+                         mode="lines+markers",
+                         line=dict(color="#DC2626", width=2.5),
+                         marker=dict(size=6, color="#DC2626"))
+        fig1.add_hline(y=0, line_dash="dash", line_color="#9CA3AF", opacity=0.4)
+        fig1.update_layout(barmode="group", height=300,
+                           yaxis_title="USD Billion",
+                           legend=dict(orientation="h", y=1.1),
+                           hovermode="x unified",
+                           plot_bgcolor="white", paper_bgcolor="white",
+                           margin=dict(t=8,b=8,l=8,r=8))
+        st.plotly_chart(fig1, use_container_width=True)
+
+    with col_r:
+        st.markdown("**Top 5 Import Sources (cumulative 2014–2024)**")
+        if not df_fact.empty:
+            _tp5 = (df_fact[df_fact["flow"]=="M"]
+                    .groupby("partner_name")["value_usd"].sum()
+                    .sort_values(ascending=False).head(5).reset_index())
+            _tp5["value_bn"] = _tp5["value_usd"] / 1e9
+            fig2 = px.bar(_tp5.sort_values("value_bn"),
+                          x="value_bn", y="partner_name", orientation="h",
+                          color="value_bn",
+                          color_continuous_scale=[[0,"#BFDBFE"],[1,"#1D4ED8"]],
+                          text="value_bn",
+                          labels={"value_bn":"USD Billion","partner_name":""})
+            fig2.update_traces(texttemplate="$%{text:.0f}bn", textposition="outside")
+            fig2.update_layout(height=300, plot_bgcolor="white",
+                               showlegend=False, coloraxis_showscale=False,
+                               margin=dict(t=8,b=8,l=8,r=80))
+            st.plotly_chart(fig2, use_container_width=True)
+
+    st.divider()
+
+    # ── What this dashboard covers ────────────────────────────────────────────
+    st.markdown("#### What this dashboard covers")
+    t1,t2,t3,t4 = st.columns(4)
+    _tiles = [
+        (t1, "📊", "Trade Flows",           "#3B82F6",
+         "HS4 and HS6 bilateral exports &amp; imports across 11 years and 200+ partner countries."),
+        (t2, "🇨🇳", "China Risk",            "#EF4444",
+         "HS6-level China import dependency. Flags CRITICAL inputs sourced &gt;70% from China."),
+        (t3, "📈", "Export Competitiveness","#10B981",
+         "Intra-sector RCA at HS6. Reveals where India holds revealed comparative advantage."),
+        (t4, "🏷️", "Tariff Structure",      "#F59E0B",
+         "CBIC 2025-26 BCD at HS6 with Inverted Duty Structure analysis and China overlay."),
+    ]
+    for col, icon, title, color, desc in _tiles:
+        with col:
+            st.markdown(f"""
+<div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:10px;
+            padding:20px 16px;border-top:3px solid {color};min-height:148px">
+  <span style="font-size:26px">{icon}</span>
+  <div style="font-weight:700;color:#1E293B;font-size:15px;margin:8px 0 6px">{title}</div>
+  <div style="font-size:12px;color:#64748B;line-height:1.55">{desc}</div>
+</div>""", unsafe_allow_html=True)
+
+    # ── Data citation ─────────────────────────────────────────────────────────
+    st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
+    st.markdown("""
+<div style="background:#F1F5F9;border-radius:8px;padding:14px 18px;
+            font-size:12px;color:#64748B;line-height:1.8">
+  <b>Data sources:</b>
+  UN Comtrade+ Bulk API — India as reporter (code 699), 2014–2024 &nbsp;·&nbsp;
+  CBIC Custom Tariff Schedule 2025-26 (Ministry of Finance, GoI) &nbsp;·&nbsp;
+  BEC Rev.5 product classification (INTERMEDIATE / CAPITAL / FINAL) &nbsp;·&nbsp;
+  NCAER Research
+</div>
+""", unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════
 # PAGE B — SECTOR DEEP DIVE
@@ -710,61 +802,82 @@ Partner code 156 = People's Republic of China. Excludes re-exports via Hong Kong
 **good_type** is from BEC Rev.5 classification: INTERMEDIATE = components/materials, CAPITAL = machinery/equipment, FINAL = consumer goods. Inputs matter more because substitution is harder than for finished goods.
             """)
 
-        cd=china_dep(df)
-        if cd.empty:
-            st.warning("China risk requires hs4 data. Check your pipeline output.")
+        imp_all = df[df["flow"]=="M"].copy()
+        if imp_all.empty or "hs6" not in imp_all.columns or imp_all["hs6"].isna().all():
+            st.warning("China risk requires hs6 import data. Check your pipeline output.")
         else:
-            crit=(cd["risk_level"]=="CRITICAL").sum()
-            high=(cd["risk_level"]=="HIGH").sum()
-            china_tot=df[(df["flow"]=="M")&(df["partner_iso3"].astype(str)=="156")
-                        ]["value_usd"].sum()/1e9
-            avg=cd["china_share"].mean()
+            tot6 = imp_all.groupby("hs6")["value_usd"].sum().rename("total_usd")
+            chn6 = (imp_all[imp_all["partner_iso3"].astype(str)=="156"]
+                    .groupby("hs6")["value_usd"].sum().rename("china_usd"))
+            cd = pd.concat([tot6, chn6], axis=1).reset_index().fillna(0)
+            cd["china_share"]  = (cd["china_usd"] /
+                                   cd["total_usd"].replace(0, float("nan"))).fillna(0)
+            cd["total_bn"]     = cd["total_usd"] / 1e9
+            cd["china_bn"]     = cd["china_usd"] / 1e9
+            cd["product_desc"] = cd["hs6"].map(hs6_desc).fillna("HS " + cd["hs6"].astype(str))
+            gtype = imp_all.groupby("hs6")["good_type"].first()
+            cd = cd.merge(gtype, on="hs6", how="left")
+            cd["good_type"] = cd["good_type"].fillna("UNCLASSIFIED")
+            def _crisk(row):
+                s, g = row["china_share"], row["good_type"]
+                if s>0.7 and g in("INTERMEDIATE","CAPITAL"): return "CRITICAL"
+                if s>0.5 and g in("INTERMEDIATE","CAPITAL"): return "HIGH"
+                if s>0.3: return "MEDIUM"
+                return "LOW"
+            cd["risk_level"] = cd.apply(_crisk, axis=1)
+            cd = cd[cd["total_usd"]>0].sort_values("china_share", ascending=False)
 
-            c1,c2,c3,c4=st.columns(4)
-            c1.metric("🔴 CRITICAL products",str(crit),
-                      delta="Immediate policy priority",delta_color="inverse")
-            c2.metric("🟠 HIGH risk products",str(high),
-                      delta="Monitor closely",delta_color="inverse")
-            c3.metric("Average China share",f"{avg*100:.0f}%")
-            c4.metric("Total from China",f"${china_tot:.0f}bn")
+            crit      = int((cd["risk_level"]=="CRITICAL").sum())
+            high      = int((cd["risk_level"]=="HIGH").sum())
+            china_tot = float(cd["china_bn"].sum())
+            avg       = float(cd["china_share"].mean())
 
-            cd["china_pct"]=cd["china_share"]*100
-            fig=px.bar(cd.sort_values("china_pct",ascending=True),
-                       x="china_pct",y="hs4_desc",
-                       color="risk_level",color_discrete_map=RISK_COLORS,
-                       orientation="h",
-                       labels={"china_pct":"China's share (%)","hs4_desc":"",
-                               "risk_level":"Risk Level"},
-                       text="china_pct",
-                       hover_data={"total_bn":":.1f","china_bn":":.1f"},
-                       title="China's share of India's imports by product")
-            fig.add_vline(x=50,line_dash="dash",line_color="#DC2626",
+            c1,c2,c3,c4 = st.columns(4)
+            c1.metric("🔴 CRITICAL HS6 lines", str(crit),
+                      delta="Immediate policy priority", delta_color="inverse")
+            c2.metric("🟠 HIGH risk lines",     str(high),
+                      delta="Monitor closely",          delta_color="inverse")
+            c3.metric("Average China share",    f"{avg*100:.0f}%")
+            c4.metric("Total from China",       f"${china_tot:.0f}bn")
+
+            cd["china_pct"] = cd["china_share"] * 100
+            chart_cd = cd.nlargest(30, "china_share").sort_values("china_share")
+            fig = px.bar(chart_cd,
+                         x="china_pct", y="product_desc",
+                         color="risk_level", color_discrete_map=RISK_COLORS,
+                         orientation="h",
+                         labels={"china_pct":"China share (%)","product_desc":"",
+                                 "risk_level":"Risk"},
+                         text="china_pct",
+                         hover_data={"hs6":True,"total_bn":":.1f","china_bn":":.1f"},
+                         title="Top 30 HS6 Lines by China Import Dependency")
+            fig.add_vline(x=50, line_dash="dash", line_color="#DC2626",
                           annotation_text="50% danger zone",
                           annotation_position="top right")
-            fig.add_vline(x=70,line_dash="dot",line_color="#7f0000",
+            fig.add_vline(x=70, line_dash="dot",  line_color="#7f0000",
                           annotation_text="70% critical",
                           annotation_position="bottom right")
-            fig.update_traces(texttemplate="%{text:.0f}%",textposition="outside")
-            fig.update_layout(height=max(500,len(cd)*22),
-                              legend=dict(orientation="h",y=1.01),
-                              margin=dict(r=60),xaxis_range=[0,108],
+            fig.update_traces(texttemplate="%{text:.0f}%", textposition="outside")
+            fig.update_layout(height=max(500, len(chart_cd)*20),
+                              legend=dict(orientation="h", y=1.01),
+                              margin=dict(r=60, l=280), xaxis_range=[0,115],
                               plot_bgcolor="white")
-            st.plotly_chart(fig,use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True)
 
-            disp=cd[["hs4","hs4_desc","good_type","risk_level",
-                      "china_share","china_bn","total_bn"]].copy()
-            disp["china_share"]=(disp["china_share"]*100).map("{:.1f}%".format)
-            disp["china_bn"]=disp["china_bn"].map("${:.1f}bn".format)
-            disp["total_bn"]=disp["total_bn"].map("${:.1f}bn".format)
-            disp.columns=["HS4","Product","Type","Risk","China %","From China","Total Imports"]
-            def cr(v):
+            disp = cd[["hs6","product_desc","good_type","risk_level",
+                        "china_share","china_bn","total_bn"]].copy()
+            disp["china_share"] = (disp["china_share"]*100).map("{:.1f}%".format)
+            disp["china_bn"]    = disp["china_bn"].map("${:.1f}bn".format)
+            disp["total_bn"]    = disp["total_bn"].map("${:.1f}bn".format)
+            disp.columns = ["HS6","Product","Type","Risk","China %","From China","Total Imports"]
+            def _cr_style(v):
                 return {"CRITICAL":"background-color:#FEE2E2",
-                        "HIGH":"background-color:#FED7AA",
-                        "MEDIUM":"background-color:#FEF3C7",
-                        "LOW":"background-color:#D1FAE5"}.get(v,"")
-            st.dataframe(disp.style.map(cr,subset=["Risk"]),
-                         use_container_width=True,hide_index=True)
-            dl(cd,"China risk data","china_risk.csv")
+                        "HIGH":    "background-color:#FED7AA",
+                        "MEDIUM":  "background-color:#FEF3C7",
+                        "LOW":     "background-color:#D1FAE5"}.get(v,"")
+            st.dataframe(disp.style.map(_cr_style, subset=["Risk"]),
+                         use_container_width=True, hide_index=True)
+            dl(cd, "China risk data (HS6)", "china_risk_hs6.csv")
 
     # ── RCA ────────────────────────────────────────────────────────
     elif sub=="📈 RCA":
@@ -801,55 +914,69 @@ This normalises each product's export share by what it would be if exports were 
 **Important caveat:** This is an *intra-sector* RCA only. The standard Balassa formula uses world export totals in the denominator, which requires cross-country data from WITS or Comtrade world reporter. The values here are therefore not comparable across sectors or to published Balassa indices.
             """)
 
-        rc=calc_rca(df)
-        if rc.empty:
-            st.warning("RCA requires export data with hs4 codes.")
+        exp_df = df[df["flow"]=="X"].copy()
+        if exp_df.empty or "hs6" not in exp_df.columns or exp_df["hs6"].isna().all():
+            st.warning("RCA requires export data with hs6 codes.")
         else:
-            nr=(rc["rca"]>1).sum()
-            top_r=rc.iloc[0]
-            rca_x=rc[rc["rca"]>1]["value_bn"].sum()
-            tot=rc["value_bn"].sum()
+            total_exp = float(exp_df["value_usd"].sum())
+            n_hs6     = int(exp_df["hs6"].dropna().nunique())
 
-            c1,c2,c3,c4=st.columns(4)
-            c1.metric("Products with RCA>1",f"{nr} / {len(rc)}",
-                      help="Sectors where India is competitively strong")
-            c2.metric("Strongest competitive product",
-                      top_r["hs4_desc"][:26]+"…" if len(top_r["hs4_desc"])>26 else top_r["hs4_desc"],
-                      delta=f"RCA = {top_r['rca']:.1f}x specialisation")
-            c3.metric("Exports in RCA>1 products",f"${rca_x:.0f}bn")
+            rc = (exp_df.groupby("hs6")
+                  .agg(value_usd=("value_usd","sum"),
+                       good_type=("good_type","first"))
+                  .reset_index())
+            rc["product_desc"] = rc["hs6"].map(hs6_desc).fillna("HS " + rc["hs6"].astype(str))
+            rc["label"]        = rc["hs6"] + " — " + rc["product_desc"]
+            rc["share"]        = rc["value_usd"] / total_exp if total_exp > 0 else 0
+            rc["share_pct"]    = 100 * rc["share"]
+            rc["rca"]          = rc["share"] * n_hs6
+            rc["has_rca"]      = rc["rca"] > 1
+            rc["value_bn"]     = rc["value_usd"] / 1e9
+            rc = rc.sort_values("rca", ascending=False).reset_index(drop=True)
+
+            nr    = int(rc["rca"].gt(1).sum())
+            top_r = rc.iloc[0]
+            rca_x = float(rc.loc[rc["has_rca"],"value_bn"].sum())
+            tot   = float(rc["value_bn"].sum())
+
+            c1,c2,c3,c4 = st.columns(4)
+            c1.metric("HS6 lines with RCA>1", f"{nr} / {len(rc)}",
+                      help="HS6 codes where India has above-average export concentration")
+            top_lbl = top_r["product_desc"]
+            c2.metric("Strongest line",
+                      (top_lbl[:28]+"…") if len(top_lbl)>28 else top_lbl,
+                      delta=f"RCA = {top_r['rca']:.1f}×")
+            c3.metric("Exports in RCA>1 lines", f"${rca_x:.1f}bn")
             c4.metric("Share of sector exports",
                       f"{100*rca_x/tot:.0f}%" if tot>0 else "—")
 
-            fig=px.scatter(rc,x="share_pct",y="rca",size="value_bn",color="good_type",
-                           color_discrete_map=GT_COLORS,hover_name="hs4_desc",
-                           hover_data={"value_bn":":.1f","rca":":.2f","share_pct":":.1f"},
-                           labels={"share_pct":"Share of sector exports (%)",
-                                   "rca":"Competitiveness (RCA)",
-                                   "value_bn":"Export value ($bn)"},
-                           title="India's Export Competitiveness — HS85 Products",
-                           size_max=60)
-            fig.add_hline(y=1,line_dash="dash",line_color="#9CA3AF",
-                          annotation_text="RCA=1 (average)",
+            fig = px.scatter(rc, x="share_pct", y="rca",
+                             size="value_bn", color="good_type",
+                             color_discrete_map=GT_COLORS,
+                             hover_name="label",
+                             hover_data={"hs6":True,"value_bn":":.2f",
+                                         "rca":":.2f","share_pct":":.2f"},
+                             labels={"share_pct":"Share of HS85 exports (%)",
+                                     "rca":"RCA (intra-sector)",
+                                     "value_bn":"Export value ($bn)"},
+                             title="India's Export Competitiveness — HS85 at HS6 Level",
+                             size_max=50)
+            fig.add_hline(y=1, line_dash="dash", line_color="#9CA3AF",
+                          annotation_text="RCA = 1 (sector average)",
                           annotation_position="right")
-            fig.add_annotation(x=1,y=rc["rca"].max()*0.88,
-                               text="✅ Strong & specialised",
-                               showarrow=False,font=dict(color="#10B981",size=11))
-            fig.add_annotation(x=rc["share_pct"].max()*0.65,y=0.4,
-                               text="⚠ Large volume, low specialisation",
-                               showarrow=False,font=dict(color="#F59E0B",size=11))
-            fig.update_layout(height=500,plot_bgcolor="white")
-            st.plotly_chart(fig,use_container_width=True)
+            fig.update_layout(height=520, plot_bgcolor="white")
+            st.plotly_chart(fig, use_container_width=True)
 
-            disp=rc[["hs4","hs4_desc","good_type","rca","has_rca",
-                      "share_pct","value_bn"]].copy()
-            disp["rca"]=disp["rca"].map("{:.2f}".format)
-            disp["share_pct"]=disp["share_pct"].map("{:.1f}%".format)
-            disp["value_bn"]=disp["value_bn"].map("${:.1f}bn".format)
-            disp["has_rca"]=disp["has_rca"].map({True:"✅ Yes",False:"❌ No"})
-            disp.columns=["HS4","Product","Type","RCA Score","Competitive?",
-                          "Export Share","Value"]
-            st.dataframe(disp,use_container_width=True,hide_index=True)
-            dl(rc,"RCA analysis","rca_analysis.csv")
+            disp = rc[["hs6","product_desc","good_type",
+                        "rca","has_rca","share_pct","value_bn"]].copy()
+            disp["rca"]       = disp["rca"].map("{:.2f}".format)
+            disp["share_pct"] = disp["share_pct"].map("{:.2f}%".format)
+            disp["value_bn"]  = disp["value_bn"].map("${:.2f}bn".format)
+            disp["has_rca"]   = disp["has_rca"].map({True:"✅ Yes",False:"❌ No"})
+            disp.columns = ["HS6","Product","Type","RCA Score",
+                             "Competitive?","Export Share","Value"]
+            st.dataframe(disp, use_container_width=True, hide_index=True)
+            dl(rc, "RCA analysis (HS6)", "rca_analysis_hs6.csv")
 
     # ── TARIFFS ────────────────────────────────────────────────────
     elif sub=="🏷️ Tariffs":
@@ -944,10 +1071,9 @@ Positive gap = inverted duty on that specific input line.
         tar_hs6 = load_tariff_hs6()
         if not tar_hs6.empty:
             hs85_t6 = tar_hs6[tar_hs6["hs2"] == "85"].copy()
-            hs85_t6["product_desc"] = hs85_t6["hs6"].map(hs6_desc).fillna("")
-            hs85_t6["label"] = hs85_t6.apply(
-                lambda r: f"{r['hs6']} – {r['product_desc']}" if r["product_desc"] else r["hs6"],
-                axis=1,
+            # Join product descriptions from trade data
+            hs85_t6["product_desc"] = (
+                hs85_t6["hs6"].map(hs6_desc).fillna("HS " + hs85_t6["hs6"].astype(str))
             )
             if not tar_profile.empty and "good_type" in tar_profile.columns:
                 hs85_t6 = hs85_t6.merge(
@@ -958,12 +1084,14 @@ Positive gap = inverted duty on that specific input line.
                 hs85_t6["good_type"] = "UNCLASSIFIED"
             else:
                 hs85_t6["good_type"] = hs85_t6["good_type"].fillna("UNCLASSIFIED")
-            ta6 = hs85_t6[["label","hs4","good_type","bcd_avg","igst_avg",
-                            "total_eff_avg","n_lines"]].copy()
+            # Column order: HS6, Description, Good Type, BCD, IGST, Total Eff Duty, N Lines
+            ta6 = hs85_t6[["hs6","product_desc","good_type",
+                            "bcd_avg","igst_avg","total_eff_avg","n_lines"]].copy()
             ta6["bcd_avg"]       = ta6["bcd_avg"].round(1)
             ta6["igst_avg"]      = ta6["igst_avg"].round(1)
             ta6["total_eff_avg"] = ta6["total_eff_avg"].round(1)
-            ta6.columns = ["HS6 — Product","HS4","Type","BCD (%)","IGST (%)","Total Eff (%)","HS8 Lines"]
+            ta6.columns = ["HS6","Product Description","Good Type",
+                           "BCD (%)","IGST (%)","Total Effective Duty (%)","N Lines"]
             st.dataframe(ta6, use_container_width=True, hide_index=True, height=420)
             dl(hs85_t6, "Tariff detail (HS6)", "tariff_detail_hs6.csv")
         else:
