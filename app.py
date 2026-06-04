@@ -89,6 +89,13 @@ def load_fact():
     df = load_and_preprocess(p)
     if "hs4" in df.columns:
         df["hs4_desc"] = df["hs4"].map(HS4_DESC).fillna("HS"+df["hs4"].fillna("").astype(str))
+    # COUNTRY_NAMES takes priority for known codes; Comtrade name used for all others
+    if "partner_iso3" in df.columns:
+        mapped = df["partner_iso3"].astype(str).map(COUNTRY_NAMES)
+        if "partner_name" not in df.columns:
+            df["partner_name"] = mapped.fillna("Country " + df["partner_iso3"].astype(str))
+        else:
+            df["partner_name"] = mapped.fillna(df["partner_name"])
     return df
 
 @st.cache_data(show_spinner="Loading sector summary…")
@@ -114,6 +121,12 @@ def load_inv_duty():
 @st.cache_data(show_spinner="Loading duty by type…")
 def load_duty_by_type():
     p = PROC / "tariff_by_good_type.parquet"
+    if not p.exists(): return pd.DataFrame()
+    return pd.read_parquet(p)
+
+@st.cache_data(show_spinner="Loading HS6 tariff data…")
+def load_tariff_hs6():
+    p = PROC / "tariff_hs6_agg.parquet"
     if not p.exists(): return pd.DataFrame()
     return pd.read_parquet(p)
 
@@ -207,6 +220,16 @@ def calc_rca(df):
 df_fact    = load_fact()
 df_summary = load_summary()
 
+# HS6 product description lookup — '850110' → 'Electric motors <75W'
+hs6_desc: dict = {}
+if not df_fact.empty and "hs6" in df_fact.columns and "product_desc" in df_fact.columns:
+    hs6_desc = (
+        df_fact[df_fact["product_desc"].notna() & df_fact["product_desc"].ne("")]
+        .drop_duplicates("hs6")
+        .set_index("hs6")["product_desc"]
+        .to_dict()
+    )
+
 # ─── Sidebar ──────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## 🇮🇳 India Trade Intelligence")
@@ -272,13 +295,18 @@ def apply_filters(df):
 # PAGE A — GLOBAL OVERVIEW
 # ══════════════════════════════════════════════════════════════════
 if page=="🌐 Global Overview":
-    st.title("India's Place in Global Trade")
-    st.markdown("> Explore India's full trade story — what we buy, what we sell, "
-                "from whom, and what it means for the economy.")
+    st.title("India Trade Intelligence Dashboard")
+    st.markdown(
+        "**HS85 Electronics & Electrical Equipment | UN Comtrade+ 2014–2024 | NCAER**"
+    )
+    st.markdown(
+        "Bilateral trade flows, China supply-chain exposure, export competitiveness (RCA), "
+        "and tariff structure (CBIC 2025-26) for India's electronics sector. "
+        "Select **Sector Deep Dive** in the sidebar to begin."
+    )
     st.divider()
 
     src = df_summary if not df_summary.empty else df_fact
-    is_full = not df_summary.empty
 
     if src.empty:
         st.error("Trade data not found. Check that `data/processed/fact_trade_flows.parquet` exists.")
@@ -286,84 +314,48 @@ if page=="🌐 Global Overview":
 
     total_x = src[src["flow"]=="X"]["value_usd"].sum()/1e9
     total_m = src[src["flow"]=="M"]["value_usd"].sum()/1e9
-    deficit = total_m-total_x
+    deficit = total_m - total_x
     years   = sorted(src["year"].dropna().unique().tolist())
 
-    c1,c2,c3,c4,c5 = st.columns(5)
-    c1.metric("🟢 Total Exports",f"${total_x:,.0f}bn",
-              help="All goods India sold abroad (2014–2024)")
-    c2.metric("🔵 Total Imports",f"${total_m:,.0f}bn",
-              help="All goods India bought from abroad (2014–2024)")
-    c3.metric("⚖️ Trade Deficit",f"${deficit:,.0f}bn",
-              delta=f"India spends ${deficit:,.0f}bn more",delta_color="inverse")
-    c4.metric("📅 Years covered",f"{len(years)}",
-              delta=f"{min(years)} – {max(years)}" if years else "—")
-    c5.metric("📦 Sectors",f"{src['hs2'].nunique()}")
-
-    if not is_full:
-        st.info("📌 Showing HS85 (Electronics) only. "
-                "Run `build_sector_summary.py` for all 97 sectors.")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("🟢 Total Exports", f"${total_x:,.0f}bn",
+              help="HS85 electronics goods India sold abroad, 2014–2024")
+    c2.metric("🔵 Total Imports", f"${total_m:,.0f}bn",
+              help="HS85 electronics goods India bought from abroad, 2014–2024")
+    c3.metric("⚖️ Trade Deficit", f"${deficit:,.0f}bn",
+              delta=f"India imports ${deficit:,.0f}bn more than it exports",
+              delta_color="inverse")
+    c4.metric("📅 Years covered",
+              f"{min(years)}–{max(years)}" if years else "—",
+              delta=f"{len(years)} years of data")
 
     st.divider()
-    col1,col2 = st.columns(2)
 
-    with col1:
-        st.subheader("📅 India's trade balance over time")
-        st.caption("Green = exports (money in). Blue = imports (money out). Red line = net.")
-        bal = annual_balance(src)
-        fig = go.Figure()
-        fig.add_bar(x=bal["year"],y=bal["exports_bn"],name="Exports",
-                    marker_color="#10B981",opacity=0.85)
-        fig.add_bar(x=bal["year"],y=bal["imports_bn"],name="Imports",
-                    marker_color="#3B82F6",opacity=0.85)
-        fig.add_scatter(x=bal["year"],y=bal["balance_bn"],name="Balance",
-                        mode="lines+markers",
-                        line=dict(color="#DC2626",width=2.5),
-                        marker=dict(size=7,color="#DC2626"))
-        fig.add_hline(y=0,line_dash="dash",line_color="#9CA3AF",opacity=0.5)
-        fig.update_layout(barmode="group",height=370,
-                          yaxis_title="USD Billion",
-                          legend=dict(orientation="h",y=1.1),
-                          hovermode="x unified",plot_bgcolor="white",
-                          paper_bgcolor="white")
-        st.plotly_chart(fig,use_container_width=True)
-        dl(bal,"Annual Balance","annual_balance.csv")
+    bal = annual_balance(src)
+    fig = go.Figure()
+    fig.add_bar(x=bal["year"], y=bal["exports_bn"], name="Exports",
+                marker_color="#10B981", opacity=0.85)
+    fig.add_bar(x=bal["year"], y=bal["imports_bn"], name="Imports",
+                marker_color="#3B82F6", opacity=0.85)
+    fig.add_scatter(x=bal["year"], y=bal["balance_bn"], name="Balance",
+                    mode="lines+markers",
+                    line=dict(color="#DC2626", width=2.5),
+                    marker=dict(size=7, color="#DC2626"))
+    fig.add_hline(y=0, line_dash="dash", line_color="#9CA3AF", opacity=0.5)
+    fig.update_layout(barmode="group", height=370,
+                      yaxis_title="USD Billion",
+                      title="HS85 Electronics — India's Annual Trade Balance",
+                      legend=dict(orientation="h", y=1.1),
+                      hovermode="x unified", plot_bgcolor="white",
+                      paper_bgcolor="white")
+    st.plotly_chart(fig, use_container_width=True)
+    dl(bal, "Annual Balance", "annual_balance.csv")
 
-    with col2:
-        st.subheader("🏭 Import share by sector")
-        st.caption("Bigger box = India imports more from this category.")
-        sec_m=(src[src["flow"]=="M"]
-               .groupby(["hs2","hs2_label"])["value_usd"]
-               .sum().reset_index())
-        sec_m["value_bn"]=sec_m["value_usd"]/1e9
-        sec_m=sec_m[sec_m["value_bn"]>0.5]
-        fig3=px.treemap(sec_m,path=["hs2_label"],values="value_bn",
-                        color="value_bn",color_continuous_scale="Blues",
-                        labels={"value_bn":"Imports ($bn)"})
-        fig3.update_layout(height=370,margin=dict(t=5,b=5,l=5,r=5))
-        fig3.update_traces(texttemplate="%{label}<br><b>$%{value:.0f}bn</b>",
-                           textfont=dict(size=11))
-        st.plotly_chart(fig3,use_container_width=True)
-
-    # Sector table
-    st.subheader("📋 All sectors — exports, imports and balance")
-    sec_x=(src[src["flow"]=="X"].groupby("hs2")["value_usd"].sum().rename("x"))
-    sec_m2=(src[src["flow"]=="M"].groupby("hs2")["value_usd"].sum().rename("m"))
-    tbl=pd.concat([sec_x,sec_m2],axis=1).reset_index().fillna(0)
-    tbl["Sector"]  = "HS"+tbl["hs2"].astype(str)+" — "+tbl["hs2"].astype(str).map(HS2_LABELS).fillna("")
-    tbl["Exports"] = (tbl["x"]/1e9).map("${:.1f}bn".format)
-    tbl["Imports"] = (tbl["m"]/1e9).map("${:.1f}bn".format)
-    b=(tbl["x"]-tbl["m"])/1e9
-    tbl["Balance"] = b.map(lambda v: f"▼ ${abs(v):.1f}bn" if v<0 else f"▲ ${v:.1f}bn")
-    tbl["Result"]  = b.map(lambda v: "🔴 Deficit" if v<0 else "🟢 Surplus")
-    tbl["Import share"]=((tbl["m"]/tbl["m"].sum()*100).map("{:.1f}%".format))
-    tbl=tbl.sort_values("m",ascending=False)
-    st.dataframe(tbl[["Sector","Exports","Imports","Balance","Result","Import share"]],
-                 use_container_width=True,hide_index=True,height=460)
-    dl(tbl,"Sector Summary","sector_summary_export.csv")
-
-    st.info("👉 Use **Sector Deep Dive** in the sidebar to analyse any chapter in detail — "
-            "partners, products up to HS6, China risk, RCA, and tariff structure.")
+    st.info(
+        "👉 Use **Sector Deep Dive** in the sidebar to analyse: "
+        "trade partners, products at HS4/HS6 level, China supply-chain risk, "
+        "export competitiveness (RCA), and tariff structure."
+    )
 
 # ══════════════════════════════════════════════════════════════════
 # PAGE B — SECTOR DEEP DIVE
@@ -697,6 +689,27 @@ But high dependence in *display panels* that go into every TV assembled in India
 means the vulnerability runs through the entire domestic industry.
             """)
 
+        with st.expander("📐 Methodology",expanded=False):
+            st.markdown("""
+**China share** = China's bilateral imports ÷ total India imports, at the HS4 level.
+
+`china_share(hs4) = Σ value_usd [partner=156, hs4] / Σ value_usd [hs4]`
+
+**Data source:** UN Comtrade+ bulk API, India as reporter (code 699), 2014–2024.
+Partner code 156 = People's Republic of China. Excludes re-exports via Hong Kong (344) or other intermediaries.
+
+**Risk classification thresholds:**
+
+| Level | Condition |
+|---|---|
+| CRITICAL | china_share > 70% AND good_type ∈ {INTERMEDIATE, CAPITAL} |
+| HIGH | china_share > 50% AND good_type ∈ {INTERMEDIATE, CAPITAL} |
+| MEDIUM | china_share > 30% (any good type) |
+| LOW | otherwise |
+
+**good_type** is from BEC Rev.5 classification: INTERMEDIATE = components/materials, CAPITAL = machinery/equipment, FINAL = consumer goods. Inputs matter more because substitution is harder than for finished goods.
+            """)
+
         cd=china_dep(df)
         if cd.empty:
             st.warning("China risk requires hs4 data. Check your pipeline output.")
@@ -770,6 +783,22 @@ unusually specialised in exporting a given product.
 **Important caveat:** This is an *intra-sector* RCA (within HS85 only). A full
 cross-sector Balassa RCA requires world export totals (available from WITS/Comtrade world reporter).
 For policy research, supplement this with WITS cross-sector RCA data.
+            """)
+
+        with st.expander("📐 Methodology",expanded=False):
+            st.markdown("""
+**Balassa (1965) Revealed Comparative Advantage — intra-sector version used here:**
+
+> RCA(i) = (share of product i in India's HS85 exports) × (number of HS4 categories)
+
+This normalises each product's export share by what it would be if exports were evenly spread — so RCA > 1 means India is more specialised in this product than the HS85 average.
+
+**Interpretation:**
+- RCA > 1 → comparative advantage within electronics
+- RCA = 1 → exactly average concentration
+- RCA < 1 → below-average specialisation
+
+**Important caveat:** This is an *intra-sector* RCA only. The standard Balassa formula uses world export totals in the denominator, which requires cross-country data from WITS or Comtrade world reporter. The values here are therefore not comparable across sectors or to published Balassa indices.
             """)
 
         rc=calc_rca(df)
@@ -880,6 +909,13 @@ Positive gap = inverted duty on that specific input line.
             if share > 0.3: return "MEDIUM"
             return "LOW"
 
+        st.info(
+            "**BCD (Basic Customs Duty)** is the base tariff rate applied at the border. "
+            "**Total Effective Duty = BCD + IGST + SWS**, where IGST (Integrated GST) is typically 18% "
+            "on imports and SWS (Social Welfare Surcharge) is 10% of BCD. "
+            "Total Effective Duty is the full landed-cost burden on importers."
+        )
+
         # ── Section A — Tariff Profile ─────────────────────────────────────────
         st.markdown("#### A — Tariff Structure by HS4 Group")
 
@@ -904,15 +940,42 @@ Positive gap = inverted duty on that specific input line.
                             legend=dict(orientation="h", y=1.08))
         st.plotly_chart(fig_a, use_container_width=True)
 
-        ta = tar_a[["hs4","hs4_desc","good_type","bcd_avg","total_eff_avg",
-                    "import_value_bn","ids_signal","risk_level"]].copy()
-        ta["bcd_avg"]         = ta["bcd_avg"].round(1)
-        ta["total_eff_avg"]   = ta["total_eff_avg"].round(1)
-        ta["import_value_bn"] = ta["import_value_bn"].round(1)
-        ta["ids_signal"]      = ta["ids_signal"].map({True:"⚠️", False:""})
-        ta.columns = ["HS4","Product","Type","BCD (%)","Total Eff (%)","Imports ($bn)","IDS","Risk"]
-        st.dataframe(ta, use_container_width=True, hide_index=True)
-        dl(tar_a, "Tariff profile (HS4)", "tariff_profile_hs4.csv")
+        # HS6-level detail table
+        tar_hs6 = load_tariff_hs6()
+        if not tar_hs6.empty:
+            hs85_t6 = tar_hs6[tar_hs6["hs2"] == "85"].copy()
+            hs85_t6["product_desc"] = hs85_t6["hs6"].map(hs6_desc).fillna("")
+            hs85_t6["label"] = hs85_t6.apply(
+                lambda r: f"{r['hs6']} – {r['product_desc']}" if r["product_desc"] else r["hs6"],
+                axis=1,
+            )
+            if not tar_profile.empty and "good_type" in tar_profile.columns:
+                hs85_t6 = hs85_t6.merge(
+                    tar_profile[["hs4","good_type"]].drop_duplicates(),
+                    on="hs4", how="left",
+                )
+            if "good_type" not in hs85_t6.columns:
+                hs85_t6["good_type"] = "UNCLASSIFIED"
+            else:
+                hs85_t6["good_type"] = hs85_t6["good_type"].fillna("UNCLASSIFIED")
+            ta6 = hs85_t6[["label","hs4","good_type","bcd_avg","igst_avg",
+                            "total_eff_avg","n_lines"]].copy()
+            ta6["bcd_avg"]       = ta6["bcd_avg"].round(1)
+            ta6["igst_avg"]      = ta6["igst_avg"].round(1)
+            ta6["total_eff_avg"] = ta6["total_eff_avg"].round(1)
+            ta6.columns = ["HS6 — Product","HS4","Type","BCD (%)","IGST (%)","Total Eff (%)","HS8 Lines"]
+            st.dataframe(ta6, use_container_width=True, hide_index=True, height=420)
+            dl(hs85_t6, "Tariff detail (HS6)", "tariff_detail_hs6.csv")
+        else:
+            ta = tar_a[["hs4","hs4_desc","good_type","bcd_avg","total_eff_avg",
+                        "import_value_bn","ids_signal","risk_level"]].copy()
+            ta["bcd_avg"]         = ta["bcd_avg"].round(1)
+            ta["total_eff_avg"]   = ta["total_eff_avg"].round(1)
+            ta["import_value_bn"] = ta["import_value_bn"].round(1)
+            ta["ids_signal"]      = ta["ids_signal"].map({True:"⚠️", False:""})
+            ta.columns = ["HS4","Product","Type","BCD (%)","Total Eff (%)","Imports ($bn)","IDS","Risk"]
+            st.dataframe(ta, use_container_width=True, hide_index=True)
+            dl(tar_a, "Tariff profile (HS4)", "tariff_profile_hs4.csv")
 
         st.divider()
 
@@ -924,6 +987,23 @@ Positive gap = inverted duty on that specific input line.
             "compared to the average BCD across all OUTPUT lines in HS85. "
             "A positive gap = inverted duty on that specific product line."
         )
+
+        with st.expander("📐 Methodology — IDS", expanded=False):
+            st.markdown("""
+**Inverted Duty Structure (IDS):** an INPUT good's BCD exceeds the average BCD of OUTPUT goods in the same sector.
+
+**Definitions:**
+- **INPUT** = HS6 lines whose parent HS4 heading is classified INTERMEDIATE or CAPITAL per BEC Rev.5
+- **OUTPUT** = HS6 lines whose parent HS4 heading is classified FINAL per BEC Rev.5
+- **Reference BCD** = unweighted mean BCD across all OUTPUT HS6 lines in HS85 (chapter-level benchmark)
+- **IDS Gap (pp)** = this INPUT line's BCD − Reference BCD
+- **IDS Flag** = True where IDS Gap > 0
+
+**Limitation:** good_type is assigned at the HS4 heading level (BEC Rev.5). All HS6 sub-headings within the same HS4 share the same INPUT/OUTPUT classification; finer-grained classification would require an HS6-level BEC concordance.
+
+**Policy implication:** IDS raises the cost of imported inputs relative to finished goods, reducing the incentive to assemble domestically. It is a structural form of anti-manufacturing bias embedded in the tariff schedule.
+            """)
+
 
         if not tar_ida.empty:
             # Rebuild china_share and risk_level for selected period
