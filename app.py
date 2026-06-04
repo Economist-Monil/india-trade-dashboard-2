@@ -23,6 +23,11 @@ from preprocess import (
 )
 
 PROC = ROOT / "data" / "processed"
+# ─── DEBUG (remove after diagnosis) ───────────────────────────────────
+import os
+st.sidebar.write("PROC path:", str(PROC))
+st.sidebar.write("Files found:", os.listdir(PROC) if PROC.exists() else "PROC does not exist")
+# ──────────────────────────────────────────────────────────────────────
 # ─── Page config ──────────────────────────────────────────────────────
 st.set_page_config(
     page_title="India Trade Intelligence",
