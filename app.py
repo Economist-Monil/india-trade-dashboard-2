@@ -1,6 +1,6 @@
 """
 app.py — India Trade Intelligence Dashboard
-Run: streamlit run D:\Trade_Dashboard\app.py
+Run: streamlit run app.py
 """
 import io
 import pandas as pd
