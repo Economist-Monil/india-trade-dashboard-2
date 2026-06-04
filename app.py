@@ -95,6 +95,8 @@ def load_fact():
     p = PROC/"fact_trade_flows.parquet"
     if not p.exists(): return pd.DataFrame()
     df = load_and_preprocess(p)
+    st.sidebar.write("fact rows after load:", len(df))
+    st.sidebar.write("columns:", df.columns.tolist())
     if "hs4" in df.columns:
         df["hs4_desc"] = df["hs4"].map(HS4_DESC).fillna("HS"+df["hs4"].fillna("").astype(str))
     return df
