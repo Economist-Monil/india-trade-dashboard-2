@@ -3,29 +3,37 @@ app.py — India Trade Intelligence Dashboard
 Run: streamlit run app.py
 """
 import io
-import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-import streamlit as st
-from pathlib import Path
 import sys
+from pathlib import Path
+import streamlit as st
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
-from preprocess import (
-    load_and_preprocess, safe_nunique, validate,
-    HS2_LABELS, COUNTRY_NAMES, FLOW_NORM, get_available_levels,
-)
-
-PROC = ROOT / "data" / "processed"
-# ─── Page config ──────────────────────────────────────────────────────
+# ─── Page config (must be first Streamlit call) ───────────────────────
 st.set_page_config(
     page_title="India Trade Intelligence",
     page_icon="🇮🇳", layout="wide",
     initial_sidebar_state="expanded",
 )
+
+try:
+    import pandas as pd
+    import plotly.express as px
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+
+    from preprocess import (
+        load_and_preprocess, safe_nunique, validate,
+        HS2_LABELS, COUNTRY_NAMES, FLOW_NORM, get_available_levels,
+    )
+except Exception as _import_exc:
+    import traceback
+    st.error("**App failed to import dependencies. Full traceback:**")
+    st.code(traceback.format_exc(), language="python")
+    st.stop()
+
+PROC = ROOT / "data" / "processed"
 
 # ─── Hide default Streamlit chrome ────────────────────────────────────
 st.markdown("""
