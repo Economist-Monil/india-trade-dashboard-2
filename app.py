@@ -11,9 +11,6 @@ import streamlit as st
 from pathlib import Path
 import sys
 
-from pathlib import Path
-import sys
-
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
@@ -23,11 +20,6 @@ from preprocess import (
 )
 
 PROC = ROOT / "data" / "processed"
-# ─── DEBUG (remove after diagnosis) ───────────────────────────────────
-import os
-st.sidebar.write("PROC path:", str(PROC))
-st.sidebar.write("Files found:", os.listdir(PROC) if PROC.exists() else "PROC does not exist")
-# ──────────────────────────────────────────────────────────────────────
 # ─── Page config ──────────────────────────────────────────────────────
 st.set_page_config(
     page_title="India Trade Intelligence",
@@ -95,8 +87,6 @@ def load_fact():
     p = PROC/"fact_trade_flows.parquet"
     if not p.exists(): return pd.DataFrame()
     df = load_and_preprocess(p)
-    st.sidebar.write("fact rows after load:", len(df))
-    st.sidebar.write("columns:", df.columns.tolist())
     if "hs4" in df.columns:
         df["hs4_desc"] = df["hs4"].map(HS4_DESC).fillna("HS"+df["hs4"].fillna("").astype(str))
     return df
@@ -266,7 +256,7 @@ with st.sidebar:
     n = len(df_fact) if not df_fact.empty else 0
     st.caption(f"📁 {n:,} records | HS85 Electronics")
     if df_summary.empty:
-        st.caption("⚠ Run build_sector_summary.py for all sectors")
+        st.caption("⚠ Showing HS85 only — sector_summary.parquet not found")
 
 def apply_filters(df):
     if df.empty: return df
@@ -291,7 +281,7 @@ if page=="🌐 Global Overview":
     is_full = not df_summary.empty
 
     if src.empty:
-        st.error("No data. Run: `python run_pipeline.py --sector 85`")
+        st.error("Trade data not found. Check that `data/processed/fact_trade_flows.parquet` exists.")
         st.stop()
 
     total_x = src[src["flow"]=="X"]["value_usd"].sum()/1e9
@@ -380,7 +370,7 @@ if page=="🌐 Global Overview":
 # ══════════════════════════════════════════════════════════════════
 else:
     if df_fact.empty:
-        st.error("No data. Run: `python run_pipeline.py --sector 85`")
+        st.error("Trade data not found. Check that `data/processed/fact_trade_flows.parquet` exists.")
         st.stop()
 
     df = apply_filters(df_fact)
@@ -477,7 +467,7 @@ else:
         d2["exports_bn"] = d2["exports_bn"].map("${:.1f}bn".format)
         d2["imports_bn"] = d2["imports_bn"].map("${:.1f}bn".format)
         d2["balance_bn"] = d2["balance_bn"].map(
-            lambda x: f"🔴 −${abs(x):.1f}bn" if x>0 else f"🟢 +${abs(x):.1f}bn")
+            lambda x: f"🔴 −${abs(x):.1f}bn" if x<0 else f"🟢 +${x:.1f}bn")
         d2["cover"]      = d2["cover"].map(lambda x: f"{x:.2f}" if pd.notna(x) else "—")
         d2.columns = ["Year","Exports","Imports","Deficit/Surplus","X/M ratio"]
         st.dataframe(d2, use_container_width=True, hide_index=True)
