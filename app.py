@@ -399,17 +399,18 @@ if page=="🌐 Global Overview":
                     .groupby("partner_name")["value_usd"].sum()
                     .sort_values(ascending=False).head(5).reset_index())
             _tp5["value_bn"] = _tp5["value_usd"] / 1e9
-            fig2 = px.bar(_tp5.sort_values("value_bn"),
-                          x="value_bn", y="partner_name", orientation="h",
-                          color="value_bn",
-                          color_continuous_scale=[[0,"#BFDBFE"],[1,"#1D4ED8"]],
-                          text="value_bn",
-                          labels={"value_bn":"USD Billion","partner_name":""})
-            fig2.update_traces(texttemplate="$%{text:.0f}bn", textposition="outside")
-            fig2.update_layout(height=300, plot_bgcolor="white",
-                               showlegend=False, coloraxis_showscale=False,
-                               margin=dict(t=8,b=8,l=8,r=80))
-            st.plotly_chart(fig2, use_container_width=True)
+            if not _tp5.empty:
+                fig2 = px.bar(_tp5.sort_values("value_bn"),
+                              x="value_bn", y="partner_name", orientation="h",
+                              color="value_bn",
+                              color_continuous_scale=[[0,"#BFDBFE"],[1,"#1D4ED8"]],
+                              text="value_bn",
+                              labels={"value_bn":"USD Billion","partner_name":""})
+                fig2.update_traces(texttemplate="$%{text:.0f}bn", textposition="outside")
+                fig2.update_layout(height=300, plot_bgcolor="white",
+                                   showlegend=False, coloraxis_showscale=False,
+                                   margin=dict(t=8,b=8,l=8,r=80))
+                st.plotly_chart(fig2, use_container_width=True)
 
     st.divider()
 
@@ -815,7 +816,7 @@ Partner code 156 = People's Republic of China. Excludes re-exports via Hong Kong
             cd["total_bn"]     = cd["total_usd"] / 1e9
             cd["china_bn"]     = cd["china_usd"] / 1e9
             cd["product_desc"] = cd["hs6"].map(hs6_desc).fillna("HS " + cd["hs6"].astype(str))
-            gtype = imp_all.groupby("hs6")["good_type"].first()
+            gtype = imp_all.groupby("hs6")["good_type"].first().reset_index()
             cd = cd.merge(gtype, on="hs6", how="left")
             cd["good_type"] = cd["good_type"].fillna("UNCLASSIFIED")
             def _crisk(row):
